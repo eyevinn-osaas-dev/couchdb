@@ -147,7 +147,7 @@ open_compaction_files(DbName, OldSt, Options) ->
                 }
         end,
     unlink(DataFd),
-    erlang:monitor(process, MetaFd),
+    monitor(process, MetaFd),
     {ok, CompSt}.
 
 copy_purge_info(#comp_st{} = CompSt) ->
@@ -158,6 +158,10 @@ copy_purge_info(#comp_st{} = CompSt) ->
         retry = Retry
     } = CompSt,
     ?COMP_EVENT(purge_init),
+    % The minumum purge sequence calculation involves finding the lowest
+    % reported purge sequence across all checkpoints. Make sure to clean up any
+    % stale or deprecated internal replicator checkpoints beforehand.
+    ok = mem3_rep:cleanup_purge_checkpoints(DbName),
     MinPurgeSeq = couch_util:with_db(DbName, fun(Db) ->
         couch_db:get_minimum_purge_seq(Db)
     end),
@@ -381,13 +385,17 @@ copy_compact(#comp_st{} = CompSt) ->
 
     % Copy general properties over
     Props = couch_bt_engine:get_props(St),
-    {ok, NewSt5} = couch_bt_engine:set_props(NewSt4, Props),
+    {ok, NewSt5} = couch_bt_engine:copy_props(NewSt4, Props),
+
+    % Copy time-seq structure over
+    TSeq = couch_bt_engine:get_time_seq(St),
+    {ok, NewSt6} = couch_bt_engine:set_time_seq(NewSt5, TSeq),
 
     FinalUpdateSeq = couch_bt_engine:get_update_seq(St),
-    {ok, NewSt6} = couch_bt_engine:set_update_seq(NewSt5, FinalUpdateSeq),
+    {ok, NewSt7} = couch_bt_engine:set_update_seq(NewSt6, FinalUpdateSeq),
 
     CompSt#comp_st{
-        new_st = NewSt6
+        new_st = NewSt7
     }.
 
 copy_docs(St, #st{} = NewSt, MixedInfos, Retry) ->
@@ -693,7 +701,7 @@ merge_lookups([#doc_info{} = DI | RestInfos], [{ok, FDI} | RestLookups]) ->
     % Assert we've matched our lookups
     if
         DI#doc_info.id == FDI#full_doc_info.id -> ok;
-        true -> erlang:error({mismatched_doc_infos, DI#doc_info.id})
+        true -> error({mismatched_doc_infos, DI#doc_info.id})
     end,
     [FDI | merge_lookups(RestInfos, RestLookups)];
 merge_lookups([FDI | RestInfos], Lookups) ->
